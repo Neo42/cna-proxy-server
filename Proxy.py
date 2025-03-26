@@ -118,13 +118,46 @@ while True:
     # ProxyServer finds a cache hit
     # Send back response to client 
     # ~~~~ INSERT CODE ~~~~
-    header_sent = False
-    for line in cacheData:
-      if not header_sent and line.strip() == "":
-        clientSocket.send(f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)\r\n".encode())
-        header_sent = True
-      clientSocket.send(line.encode())
-    cacheData = "".join(cacheData)
+    # Find headers section and Content-Length
+    headers = []
+    body = []
+    content_length_line = -1
+    in_headers = True
+    
+    for i, line in enumerate(cacheData):
+        if in_headers:
+            if line.strip() == "":
+                in_headers = False
+                headers.append(line)  # Add blank line to headers
+            else:
+                if line.lower().startswith("content-length:"):
+                    content_length_line = i
+                headers.append(line)
+        else:
+            body.append(line)
+    
+    # Calculate actual body content length
+    body_content = ''.join(body)
+    body_bytes = body_content.encode()
+    actual_length = len(body_bytes)
+    
+    # Update Content-Length if found
+    if content_length_line != -1:
+        headers[content_length_line] = f"Content-Length: {actual_length}\r\n"
+    
+    # Add Via header before the blank line
+    via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)\r\n"
+    headers.insert(len(headers) - 1, via_header)
+    
+    # Send headers then body
+    for line in headers:
+        clientSocket.send(line.encode())
+    
+    # Send body as a single block to avoid line ending issues
+    clientSocket.send(body_bytes)
+    
+    # For compatibility with the rest of the code
+    cacheData = "".join(headers + body)
     # ~~~~ END CODE INSERT ~~~~
     cacheFile.close()
     print ('Sent to the client:')
