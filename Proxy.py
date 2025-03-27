@@ -118,46 +118,112 @@ while True:
     # ProxyServer finds a cache hit
     # Send back response to client 
     # ~~~~ INSERT CODE ~~~~
-    # Find headers section and Content-Length
-    headers = []
-    body = []
-    content_length_line = -1
-    in_headers = True
+    # Check if this is an image file based on content type
+    is_image = False
+    has_via_header = False
+    for line in cacheData:
+        if line.lower().startswith("content-type:") and "image/" in line.lower():
+            is_image = True
+        if line.lower().startswith("via:") and "python-proxy" in line.lower():
+            has_via_header = True
     
-    for i, line in enumerate(cacheData):
-        if in_headers:
-            if line.strip() == "":
-                in_headers = False
-                headers.append(line)  # Add blank line to headers
+    if is_image:
+        # Handle image files by reopening in binary mode
+        cacheFile.close()
+        try:
+            with open(cacheLocation, "rb") as binary_file:
+                binary_data = binary_file.read()
+                
+                # Find the header/body boundary
+                header_end = binary_data.find(b'\r\n\r\n')
+                if header_end != -1:
+                    # Split into headers and body
+                    headers = binary_data[:header_end]
+                    body = binary_data[header_end+4:]  # Skip \r\n\r\n
+                    
+                    # Convert headers to string for easier processing
+                    headers_str = headers.decode('latin-1')
+                    header_lines = headers_str.split('\r\n')
+                    modified_headers = []
+                    has_via = False
+                    
+                    # Process headers
+                    for header in header_lines:
+                        if header.lower().startswith('content-length:'):
+                            # Update Content-Length to match actual body size
+                            modified_headers.append(f'Content-Length: {len(body)}')
+                        elif header.lower().startswith('via:') and 'python-proxy' in header.lower():
+                            # Keep existing Via header
+                            modified_headers.append(header)
+                            has_via = True
+                        else:
+                            modified_headers.append(header)
+                    
+                    # Add Via header only if not already present
+                    if not has_via:
+                        via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)"
+                        modified_headers.append(via_header)
+                    
+                    # Reconstruct the full response
+                    header_block = '\r\n'.join(modified_headers).encode('latin-1')
+                    clientSocket.sendall(header_block + b'\r\n\r\n' + body)
+                    
+                    # For debug
+                    print('Sent image file from cache with Via header')
+        except Exception as e:
+            print(f"Error handling image file: {str(e)}")
+            # Fall back to text-based handling if binary fails
+            is_image = False
+            cacheFile = open(cacheLocation, "r")
+            cacheData = cacheFile.readlines()
+    
+    if not is_image:
+        # Original text file handling
+        # Find headers section and Content-Length
+        headers = []
+        body = []
+        content_length_line = -1
+        has_via = False
+        in_headers = True
+        
+        for i, line in enumerate(cacheData):
+            if in_headers:
+                if line.strip() == "":
+                    in_headers = False
+                    headers.append(line)  # Add blank line to headers
+                else:
+                    if line.lower().startswith("content-length:"):
+                        content_length_line = i
+                    # Check for existing Via header
+                    if line.lower().startswith("via:") and "python-proxy" in line.lower():
+                        has_via = True
+                    headers.append(line)
             else:
-                if line.lower().startswith("content-length:"):
-                    content_length_line = i
-                headers.append(line)
-        else:
-            body.append(line)
-    
-    # Calculate actual body content length
-    body_content = ''.join(body)
-    body_bytes = body_content.encode()
-    actual_length = len(body_bytes)
-    
-    # Update Content-Length if found
-    if content_length_line != -1:
-        headers[content_length_line] = f"Content-Length: {actual_length}\r\n"
-    
-    # Add Via header before the blank line
-    via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)\r\n"
-    headers.insert(len(headers) - 1, via_header)
-    
-    # Send headers then body
-    for line in headers:
-        clientSocket.send(line.encode())
-    
-    # Send body as a single block to avoid line ending issues
-    clientSocket.send(body_bytes)
-    
-    # For compatibility with the rest of the code
-    cacheData = "".join(headers + body)
+                body.append(line)
+        
+        # Calculate actual body content length
+        body_content = ''.join(body)
+        body_bytes = body_content.encode()
+        actual_length = len(body_bytes)
+        
+        # Update Content-Length if found
+        if content_length_line != -1:
+            headers[content_length_line] = f"Content-Length: {actual_length}\r\n"
+        
+        # Add Via header before the blank line only if not already present
+        if not has_via:
+            via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)\r\n"
+            headers.insert(len(headers) - 1, via_header)
+        
+        # Send headers then body
+        for line in headers:
+            clientSocket.send(line.encode())
+        
+        # Send body as a single block to avoid line ending issues
+        clientSocket.send(body_bytes)
+        
+        # For compatibility with the rest of the code
+        cacheData = "".join(headers + body)
     # ~~~~ END CODE INSERT ~~~~
     cacheFile.close()
     print ('Sent to the client:')
@@ -220,7 +286,38 @@ while True:
 
       # Send the response to the client
       # ~~~~ INSERT CODE ~~~~
-      clientSocket.sendall(response)
+      # Add Via header to the response before sending to the client
+      header_end = response.find(b'\r\n\r\n')
+      if header_end != -1:
+          headers = response[:header_end]
+          body = response[header_end+4:]  # Skip \r\n\r\n
+          
+          # Check if this is an image file and if Via header is already present
+          is_image = False
+          has_via = False
+          headers_str = headers.decode('latin-1', errors='replace')
+          
+          if "content-type: image/" in headers_str.lower():
+              is_image = True
+              print("Handling image file from origin server")
+              
+          if "via: 1.1" in headers_str.lower() and "python-proxy" in headers_str.lower():
+              has_via = True
+              
+          # Add Via header only if not already present
+          if not has_via:
+              via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)".encode('latin-1')
+              modified_response = headers + b'\r\n' + via_header + b'\r\n\r\n' + body
+          else:
+              modified_response = response
+          
+          clientSocket.sendall(modified_response)
+          
+          # Also update response to store the modified version in cache
+          response = modified_response
+      else:
+          # If we can't identify headers/body boundary, send as is
+          clientSocket.sendall(response)
       # ~~~~ END CODE INSERT ~~~~
 
       # Create a new file in the cache for the requested file.
