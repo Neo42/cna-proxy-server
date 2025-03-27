@@ -1,0 +1,17 @@
+# Ignore everything
+*
+# But not these files...
+!.gitignore
+!Proxy.py
+!Proxy-bonus.py
+# ...even if they are in subdirectories
+!*/
+
+# Ignore all cached files from proxy
+*/cache*
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+# OS specific files
+.DS_Store 
