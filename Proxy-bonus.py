@@ -9,6 +9,37 @@ import email.utils
 import threading
 import urllib.parse
 
+# =============================================================================
+# PROXY FEATURES IMPLEMENTATION
+# =============================================================================
+# 1. Port Number Handling:
+#    - The proxy now supports URLs with explicit port numbers (hostname:port/resource)
+#    - When a port is specified in the URL, the proxy extracts it and uses it for
+#      connection to the origin server, otherwise defaults to port 80 (HTTP)
+#    - Implementation: URL parsing code extracts port from hostname if specified
+#      using hostname.split(':'), then connects to origin server using that port
+#
+# 2. Pre-fetching of Resources:
+#    - The proxy analyzes HTML content for href and src attributes
+#    - When found, these resources are fetched in background threads and cached
+#    - Resources are not sent to client unless specifically requested later
+#    - Pre-fetch functionality respects port numbers in both absolute and relative URLs
+#    - Implementation: extract_and_prefetch_resources() parses HTML with regex
+#      and starts background threads to fetch each resource without blocking the main request
+#
+# 3. Cache Freshness Check:
+#    - The proxy implements HTTP/1.1 cache freshness validation based on RFC 2616
+#    - It supports two freshness mechanisms: Cache-Control max-age and Expires header
+#    - For max-age, the proxy stores the cache timestamp and compares the age of the
+#      cached response to the max-age value to determine freshness
+#    - For Expires, the proxy parses the date and compares it to the current time
+#    - When both are present, max-age takes precedence over Expires as per RFC 2616
+#    - Implementation: Each cached resource includes an X-Cached-Timestamp header
+#      which is used to calculate the age of the cached response. On cache hits,
+#      the proxy checks if the resource is still fresh before serving from cache.
+#      If stale, the proxy fetches a fresh copy from the origin server.
+# =============================================================================
+
 # 1MB buffer size
 BUFFER_SIZE = 1000000
 
