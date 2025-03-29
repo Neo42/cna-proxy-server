@@ -4,6 +4,8 @@ import sys
 import os
 import argparse
 import re
+import time
+import email.utils
 
 # 1MB buffer size
 BUFFER_SIZE = 1000000
@@ -119,14 +121,46 @@ while True:
     # Send back response to client 
     # ~~~~ INSERT CODE ~~~~
     max_age = None
+    expires_date = None
     
-    # Find the X-Cached-Timestamp and Cache-Control headers
+    # Find the X-Cached-Timestamp, Cache-Control and Expires headers
     for line in cacheData:
         if line.lower().startswith("x-cached-timestamp:"):
             cached_time = int(line.split(":")[1].strip())
         if line.lower().startswith("cache-control:") and "max-age=" in line.lower():
             max_age_part = line.lower().split("max-age=")[1]
             max_age = int(max_age_part.split(",")[0].strip())
+        if line.lower().startswith("expires:"):
+            expires_value = line.split(":", 1)[1].strip()
+            try:
+                expires_date = email.utils.parsedate_to_timestamp(expires_value)
+                print(f"Found Expires header: {expires_value}, timestamp: {expires_date}")
+            except:
+                print(f"Failed to parse Expires date: {expires_value}")
+    
+    # Check freshness based on Cache-Control max-age or Expires
+    current_time = int(time.time())
+    is_fresh = True
+    
+    # First check max-age if it exists (it has precedence over Expires)
+    if max_age is not None and cached_time is not None:
+        age_seconds = current_time - cached_time
+        print(f"Cache entry age: {age_seconds} seconds, max-age: {max_age} seconds")
+        
+        if age_seconds > max_age:
+            print("Cache entry is stale (max-age exceeded)! Fetching fresh copy.")
+            is_fresh = False
+            cacheFile.close()
+            raise Exception("Cache entry expired (max-age)")
+    
+    # If no max-age, check Expires
+    elif expires_date is not None:
+        print(f"Current time: {current_time}, Expires: {expires_date}")
+        if current_time > expires_date:
+            print("Cache entry is stale (Expires date passed)! Fetching fresh copy.")
+            is_fresh = False
+            cacheFile.close()
+            raise Exception("Cache entry expired (Expires header)")
     
     # Check if this is an image file based on content type
     is_image = False
@@ -353,9 +387,10 @@ while True:
       headers_str = response.decode('latin-1', errors='replace').split('\r\n\r\n')[0]
       cache_control = None
       max_age = None
+      expires_header = None
       should_cache = True
       
-      # Look for Cache-Control header
+      # Look for Cache-Control and Expires headers
       for line in headers_str.split('\r\n'):
           if line.lower().startswith('cache-control:'):
               cache_control = line
@@ -368,7 +403,31 @@ while True:
                   if max_age == 0:
                       print("Response has max-age=0, not caching")
                       should_cache = False
+          
+          # Check for Expires header
+          if line.lower().startswith('expires:'):
+              expires_header = line
+              expires_value = line.split(":", 1)[1].strip()
+              try:
+                  expires_date = email.utils.parsedate_to_timestamp(expires_value)
+                  current_time = int(time.time())
+                  print(f"Found Expires header: {expires_value}, timestamp: {expires_date}")
                   
+                  # If Expires is in the past and no max-age overrides it, don't cache
+                  if expires_date <= current_time and max_age is None:
+                      print("Expires date is in the past, not caching")
+                      should_cache = False
+              except:
+                  print(f"Failed to parse Expires date: {expires_value}")
+      
+      # Add current timestamp to the response for future freshness checks
+      if should_cache:
+          timestamp_header = f"X-Cached-Timestamp: {int(time.time())}\r\n"
+          header_end = response.find(b'\r\n\r\n')
+          if header_end != -1:
+              modified_response = response[:header_end] + b'\r\n' + timestamp_header.encode('latin-1') + response[header_end:]
+              response = modified_response
+      
       # 301 responses MAY be cached by default
       # 302 responses MUST NOT be cached unless explicitly allowed
       # 404 responses SHOULD NOT be cached unless explicitly allowed
