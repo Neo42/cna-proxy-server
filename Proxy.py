@@ -329,10 +329,39 @@ while True:
 
       # Save origin server response in the cache file
       # ~~~~ INSERT CODE ~~~~
-      cacheFile.write(response)
+      # Check status code before caching
+      status_line = response.decode('latin-1', errors='replace').split('\r\n')[0]
+      status_code = int(status_line.split()[1])
+      
+      # 301 responses MAY be cached by default
+      # 302 responses MUST NOT be cached unless explicitly allowed
+      # 404 responses SHOULD NOT be cached unless explicitly allowed
+      should_cache = True
+      if status_code in [302, 404]:
+          # Check for cache-control headers that explicitly allow caching
+          headers = response.decode('latin-1', errors='replace').split('\r\n\r\n')[0]
+          if 'Cache-Control: public' in headers or 'Cache-Control: private' in headers:
+              cacheFile.write(response)
+              print(f'{status_code} response cached due to explicit cache-control directive')
+          else:
+              # Don't cache 302/404 responses without explicit caching directives
+              print(f'{status_code} response not cached (requires explicit cache-control directive)')
+              # Close and remove the cache file since we don't want to cache these responses
+              cacheFile.close()
+              try:
+                  os.remove(cacheLocation)
+                  print(f"Removed cache file for non-cacheable {status_code} response: {cacheLocation}")
+              except OSError:
+                  print(f"Failed to remove cache file: {cacheLocation}")
+              should_cache = False
+      else:
+          cacheFile.write(response)
+          print('Response cached')
+      
+      if should_cache:
+          cacheFile.close()
+          print('cache file closed')
       # ~~~~ END CODE INSERT ~~~~
-      cacheFile.close()
-      print ('cache file closed')
 
       # finished communicating with origin server - shutdown socket writes
       print ('origin response received. Closing sockets')
