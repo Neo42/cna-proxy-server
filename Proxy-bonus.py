@@ -55,9 +55,9 @@ except:
 thread_lock = threading.Lock()
 
 # Function to pre-fetch resources
-def pre_fetch_resource(hostname, resource, origin_url):
+def pre_fetch_resource(hostname, resource, origin_url, port=80):
     try:
-        print(f"Pre-fetching: {hostname}{resource}")
+        print(f"Pre-fetching: {hostname}:{port}{resource}")
         
         # Create socket for pre-fetching
         pre_fetch_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -67,7 +67,7 @@ def pre_fetch_resource(hostname, resource, origin_url):
             address = socket.gethostbyname(hostname)
             
             # Connect to origin server
-            pre_fetch_socket.connect((address, 80))
+            pre_fetch_socket.connect((address, port))
             
             # Create request
             request = f'GET {resource} HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n'
@@ -167,7 +167,7 @@ def pre_fetch_resource(hostname, resource, origin_url):
         print(f"Error pre-fetching {resource}: {str(e)}")
 
 # Function to extract resources from HTML
-def extract_and_prefetch_resources(hostname, html_content, origin_url):
+def extract_and_prefetch_resources(hostname, html_content, origin_url, origin_port=80):
     try:
         # Convert bytes to string for regex parsing
         if isinstance(html_content, bytes):
@@ -198,6 +198,17 @@ def extract_and_prefetch_resources(hostname, html_content, origin_url):
                 try:
                     parsed_url = urllib.parse.urlparse(match)
                     resource_hostname = parsed_url.netloc
+                    resource_port = 80  # Default port
+                    
+                    # Check if port is specified in the URL
+                    if ':' in resource_hostname:
+                        hostname_parts = resource_hostname.split(':', 1)
+                        resource_hostname = hostname_parts[0]
+                        try:
+                            resource_port = int(hostname_parts[1])
+                        except ValueError:
+                            resource_port = 80
+                    
                     resource_path = parsed_url.path
                     if not resource_path:
                         resource_path = '/'
@@ -207,7 +218,7 @@ def extract_and_prefetch_resources(hostname, html_content, origin_url):
                     # Start pre-fetch in a separate thread
                     prefetch_thread = threading.Thread(
                         target=pre_fetch_resource,
-                        args=(resource_hostname, resource_path, origin_url)
+                        args=(resource_hostname, resource_path, origin_url, resource_port)
                     )
                     prefetch_thread.daemon = True
                     prefetch_thread.start()
@@ -231,7 +242,7 @@ def extract_and_prefetch_resources(hostname, html_content, origin_url):
                 # Start pre-fetch in a separate thread
                 prefetch_thread = threading.Thread(
                     target=pre_fetch_resource,
-                    args=(hostname, resource_path, origin_url)
+                    args=(hostname, resource_path, origin_url, origin_port)
                 )
                 prefetch_thread.daemon = True
                 prefetch_thread.start()
@@ -284,6 +295,18 @@ while True:
   resourceParts = URI.split('/', 1)
   hostname = resourceParts[0]
   resource = '/'
+
+  # Extract port from hostname if specified
+  port = 80  # Default HTTP port
+  if ':' in hostname:
+    hostname_parts = hostname.split(':', 1)
+    hostname = hostname_parts[0]
+    try:
+      port = int(hostname_parts[1])
+      print(f'Port specified in URL: {port}')
+    except ValueError:
+      print(f'Invalid port in URL, using default port 80')
+      port = 80
 
   if len(resourceParts) == 2:
     # Resource is absolute URI with hostname and resource
@@ -482,9 +505,9 @@ while True:
       address = socket.gethostbyname(hostname)
       # Connect to the origin server
       # ~~~~ INSERT CODE ~~~~
-      originServerSocket.connect((address, 80))
+      originServerSocket.connect((address, port))
       # ~~~~ END CODE INSERT ~~~~
-      print ('Connected to origin Server')
+      print (f'Connected to origin Server at {address}:{port}')
 
       originServerRequest = ''
       originServerRequestHeader = ''
@@ -565,7 +588,7 @@ while True:
               print(f"Starting pre-fetch for resources in {resource}")
               threading.Thread(
                   target=extract_and_prefetch_resources,
-                  args=(hostname, body, resource)
+                  args=(hostname, body, resource, port)
               ).start()
       else:
           # If we can't identify headers/body boundary, send as is
