@@ -118,6 +118,16 @@ while True:
     # ProxyServer finds a cache hit
     # Send back response to client 
     # ~~~~ INSERT CODE ~~~~
+    max_age = None
+    
+    # Find the X-Cached-Timestamp and Cache-Control headers
+    for line in cacheData:
+        if line.lower().startswith("x-cached-timestamp:"):
+            cached_time = int(line.split(":")[1].strip())
+        if line.lower().startswith("cache-control:") and "max-age=" in line.lower():
+            max_age_part = line.lower().split("max-age=")[1]
+            max_age = int(max_age_part.split(",")[0].strip())
+    
     # Check if this is an image file based on content type
     is_image = False
     has_via_header = False
@@ -156,6 +166,9 @@ while True:
                             # Keep existing Via header
                             modified_headers.append(header)
                             has_via = True
+                        elif header.lower().startswith('x-cached-timestamp:'):
+                            # Skip internal timestamp header
+                            continue
                         else:
                             modified_headers.append(header)
                     
@@ -197,6 +210,9 @@ while True:
                     # Check for existing Via header
                     if line.lower().startswith("via:") and "python-proxy" in line.lower():
                         has_via = True
+                    # Skip internal X-Cached-Timestamp header
+                    if line.lower().startswith("x-cached-timestamp:"):
+                        continue
                     headers.append(line)
             else:
                 body.append(line)
@@ -329,10 +345,66 @@ while True:
 
       # Save origin server response in the cache file
       # ~~~~ INSERT CODE ~~~~
-      cacheFile.write(response)
+      # Check status code before caching
+      status_line = response.decode('latin-1', errors='replace').split('\r\n')[0]
+      status_code = int(status_line.split()[1])
+      
+      # Extract Cache-Control header and max-age
+      headers_str = response.decode('latin-1', errors='replace').split('\r\n\r\n')[0]
+      cache_control = None
+      max_age = None
+      should_cache = True
+      
+      # Look for Cache-Control header
+      for line in headers_str.split('\r\n'):
+          if line.lower().startswith('cache-control:'):
+              cache_control = line
+              # Extract max-age if present
+              if 'max-age=' in line.lower():
+                  max_age_part = line.lower().split('max-age=')[1]
+                  max_age = int(max_age_part.split(',')[0].strip())
+                  print(f"Found max-age directive: {max_age} seconds")
+                  # Don't cache responses with max-age=0
+                  if max_age == 0:
+                      print("Response has max-age=0, not caching")
+                      should_cache = False
+                  
+      # 301 responses MAY be cached by default
+      # 302 responses MUST NOT be cached unless explicitly allowed
+      # 404 responses SHOULD NOT be cached unless explicitly allowed
+      if status_code in [302, 404]:
+          # Check for cache-control headers that explicitly allow caching
+          if cache_control and ('public' in cache_control.lower() or 'private' in cache_control.lower()):
+              if should_cache:
+                  cacheFile.write(response)
+                  print(f'{status_code} response cached due to explicit cache-control directive')
+          else:
+              # Don't cache 302/404 responses without explicit caching directives
+              print(f'{status_code} response not cached (requires explicit cache-control directive)')
+              # Close and remove the cache file since we don't want to cache these responses
+              cacheFile.close()
+              try:
+                  os.remove(cacheLocation)
+                  print(f"Removed cache file for non-cacheable {status_code} response: {cacheLocation}")
+              except OSError:
+                  print(f"Failed to remove cache file: {cacheLocation}")
+              should_cache = False
+      else:
+          if should_cache:
+              cacheFile.write(response)
+              print('Response cached')
+          else:
+              # Don't cache responses that shouldn't be cached
+              cacheFile.close()
+              try:
+                  os.remove(cacheLocation)
+                  print(f"Removed cache file for non-cacheable response: {cacheLocation}")
+              except OSError:
+                  print(f"Failed to remove cache file: {cacheLocation}")
+
       # ~~~~ END CODE INSERT ~~~~
       cacheFile.close()
-      print ('cache file closed')
+      print('cache file closed')
 
       # finished communicating with origin server - shutdown socket writes
       print ('origin response received. Closing sockets')
