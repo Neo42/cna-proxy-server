@@ -6,6 +6,8 @@ import argparse
 import re
 import time
 import email.utils
+import threading
+import urllib.parse
 
 # 1MB buffer size
 BUFFER_SIZE = 1000000
@@ -48,6 +50,193 @@ try:
 except:
   print ('Failed to listen')
   sys.exit()
+
+# Create a thread lock for thread-safe operations
+thread_lock = threading.Lock()
+
+# Function to pre-fetch resources
+def pre_fetch_resource(hostname, resource, origin_url):
+    try:
+        print(f"Pre-fetching: {hostname}{resource}")
+        
+        # Create socket for pre-fetching
+        pre_fetch_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        
+        try:
+            # Get IP address for the hostname
+            address = socket.gethostbyname(hostname)
+            
+            # Connect to origin server
+            pre_fetch_socket.connect((address, 80))
+            
+            # Create request
+            request = f'GET {resource} HTTP/1.1\r\nHost: {hostname}\r\nConnection: close\r\n\r\n'
+            pre_fetch_socket.sendall(request.encode())
+            
+            # Get response
+            pre_fetch_response = b''
+            while True:
+                data = pre_fetch_socket.recv(BUFFER_SIZE)
+                if not data:
+                    break
+                pre_fetch_response += data
+            
+            # Extract pre-fetch response details
+            pre_fetch_headers_str = pre_fetch_response.decode('latin-1', errors='replace').split('\r\n\r\n')[0]
+            pre_fetch_status_line = pre_fetch_headers_str.split('\r\n')[0]
+            
+            try:
+                pre_fetch_status_code = int(pre_fetch_status_line.split()[1])
+                print(f"Pre-fetch status code for {resource}: {pre_fetch_status_code}")
+                
+                # Only cache successful responses
+                if pre_fetch_status_code == 200:
+                    # Determine cache location
+                    cache_location = './' + hostname + resource
+                    if cache_location.endswith('/'):
+                        cache_location = cache_location + 'default'
+                    
+                    # Create cache directory if it doesn't exist
+                    cache_dir, file = os.path.split(cache_location)
+                    with thread_lock:
+                        if not os.path.exists(cache_dir):
+                            os.makedirs(cache_dir)
+                    
+                    # Extract Cache-Control header and max-age
+                    cache_control = None
+                    max_age = None
+                    expires_header = None
+                    should_cache = True
+                    
+                    # Look for Cache-Control and Expires headers
+                    for line in pre_fetch_headers_str.split('\r\n'):
+                        if line.lower().startswith('cache-control:'):
+                            cache_control = line
+                            # Extract max-age if present
+                            if 'max-age=' in line.lower():
+                                max_age_part = line.lower().split('max-age=')[1]
+                                max_age = int(max_age_part.split(',')[0].strip())
+                                # Don't cache responses with max-age=0
+                                if max_age == 0:
+                                    should_cache = False
+                        
+                        # Check for Expires header
+                        if line.lower().startswith('expires:'):
+                            expires_header = line
+                            expires_value = line.split(":", 1)[1].strip()
+                            try:
+                                expires_date = email.utils.parsedate_to_timestamp(expires_value)
+                                current_time = int(time.time())
+                                
+                                # If Expires is in the past and no max-age overrides it, don't cache
+                                if expires_date <= current_time and max_age is None:
+                                    should_cache = False
+                            except:
+                                pass
+                    
+                    # Add timestamp and Via header to the response
+                    if should_cache:
+                        # Add current timestamp for future freshness checks
+                        timestamp_header = f"X-Cached-Timestamp: {int(time.time())}\r\n"
+                        via_header = f"Via: 1.1 {proxyHost}:{proxyPort} (Python-Proxy)\r\n"
+                        
+                        header_end = pre_fetch_response.find(b'\r\n\r\n')
+                        if header_end != -1:
+                            # Check if Via header is already present
+                            headers_str = pre_fetch_response[:header_end].decode('latin-1', errors='replace')
+                            has_via = "via: 1.1" in headers_str.lower() and "python-proxy" in headers_str.lower()
+                            
+                            modified_headers = pre_fetch_response[:header_end]
+                            if not has_via:
+                                modified_headers = modified_headers + b'\r\n' + via_header.encode('latin-1')
+                            
+                            modified_headers = modified_headers + b'\r\n' + timestamp_header.encode('latin-1')
+                            modified_response = modified_headers + pre_fetch_response[header_end:]
+                            
+                            # Save to cache
+                            with thread_lock:
+                                with open(cache_location, 'wb') as cache_file:
+                                    cache_file.write(modified_response)
+                                print(f"Pre-fetched and cached: {resource} from {origin_url}")
+            except:
+                print(f"Failed to parse pre-fetch status code for {resource}")
+                
+        finally:
+            pre_fetch_socket.close()
+    except Exception as e:
+        print(f"Error pre-fetching {resource}: {str(e)}")
+
+# Function to extract resources from HTML
+def extract_and_prefetch_resources(hostname, html_content, origin_url):
+    try:
+        # Convert bytes to string for regex parsing
+        if isinstance(html_content, bytes):
+            content_str = html_content.decode('utf-8', errors='replace')
+        else:
+            content_str = html_content
+        
+        # Find all href attributes
+        href_pattern = re.compile(r'href=["\'](.*?)["\']', re.IGNORECASE)
+        href_matches = href_pattern.findall(content_str)
+        
+        # Find all src attributes
+        src_pattern = re.compile(r'src=["\'](.*?)["\']', re.IGNORECASE)
+        src_matches = src_pattern.findall(content_str)
+        
+        # Combine all matches
+        all_matches = href_matches + src_matches
+        
+        # Process each match
+        for match in all_matches:
+            # Skip empty matches, javascript, and anchors
+            if not match or match.startswith('javascript:') or match.startswith('#'):
+                continue
+                
+            # Handle relative URLs and convert to absolute path
+            if match.startswith('http://') or match.startswith('https://'):
+                # Extract hostname and resource from absolute URL
+                try:
+                    parsed_url = urllib.parse.urlparse(match)
+                    resource_hostname = parsed_url.netloc
+                    resource_path = parsed_url.path
+                    if not resource_path:
+                        resource_path = '/'
+                    if parsed_url.query:
+                        resource_path += f'?{parsed_url.query}'
+                    
+                    # Start pre-fetch in a separate thread
+                    prefetch_thread = threading.Thread(
+                        target=pre_fetch_resource,
+                        args=(resource_hostname, resource_path, origin_url)
+                    )
+                    prefetch_thread.daemon = True
+                    prefetch_thread.start()
+                except:
+                    print(f"Failed to parse absolute URL: {match}")
+            else:
+                # Handle relative URLs
+                resource_path = match
+                if not resource_path.startswith('/'):
+                    # Convert relative path to absolute based on origin URL
+                    base_path = '/'
+                    if '/' in origin_url and not origin_url.endswith('/'):
+                        base_path = '/' + '/'.join(origin_url.split('/')[:-1])
+                    resource_path = f"{base_path}/{resource_path}"
+                
+                # Normalize the path (remove ./ and ../)
+                resource_path = os.path.normpath(resource_path).replace('\\', '/')
+                if not resource_path.startswith('/'):
+                    resource_path = '/' + resource_path
+                
+                # Start pre-fetch in a separate thread
+                prefetch_thread = threading.Thread(
+                    target=pre_fetch_resource,
+                    args=(hostname, resource_path, origin_url)
+                )
+                prefetch_thread.daemon = True
+                prefetch_thread.start()
+    except Exception as e:
+        print(f"Error extracting resources: {str(e)}")
 
 # continuously accept connections
 while True:
@@ -345,12 +534,17 @@ while True:
           # Check if this is an image file and if Via header is already present
           is_image = False
           has_via = False
+          is_html = False
           headers_str = headers.decode('latin-1', errors='replace')
           
           if "content-type: image/" in headers_str.lower():
               is_image = True
               print("Handling image file from origin server")
-              
+          
+          if "content-type: text/html" in headers_str.lower():
+              is_html = True
+              print("Handling HTML file from origin server")
+          
           if "via: 1.1" in headers_str.lower() and "python-proxy" in headers_str.lower():
               has_via = True
               
@@ -365,6 +559,14 @@ while True:
           
           # Also update response to store the modified version in cache
           response = modified_response
+          
+          # If the response is HTML, extract and pre-fetch linked resources
+          if is_html:
+              print(f"Starting pre-fetch for resources in {resource}")
+              threading.Thread(
+                  target=extract_and_prefetch_resources,
+                  args=(hostname, body, resource)
+              ).start()
       else:
           # If we can't identify headers/body boundary, send as is
           clientSocket.sendall(response)
